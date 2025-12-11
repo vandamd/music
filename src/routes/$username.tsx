@@ -39,6 +39,33 @@ const getCurrentTrack = createServerFn({ method: 'GET' })
     }
   })
 
+async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<AlbumArtResult | null> {
+  const artworkResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `url=${encodeURIComponent(appleMusicUrl)}`,
+  })
+  const artworkData = (await artworkResponse.json()) as AppleArtworkResponse
+
+  if (artworkData.error || !artworkData.large) return null
+
+  const animatedResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
+  })
+  const animatedData = (await animatedResponse.json()) as AppleAnimatedResponse
+
+  const animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
+    ? animatedData.animatedUrl
+    : null
+
+  return {
+    imageUrl: artworkData.large,
+    animatedUrl,
+  }
+}
+
 const getAlbumArt = createServerFn({ method: 'GET' })
   .inputValidator((data: { artist: string; album: string; track: string }) => data)
   .handler(async ({ data }): Promise<AlbumArtResult | null> => {
@@ -46,34 +73,26 @@ const getAlbumArt = createServerFn({ method: 'GET' })
     const searchResponse = await fetch(searchUrl)
     const searchData = (await searchResponse.json()) as { results: Array<{ collectionViewUrl: string }> }
 
-    if (!searchData.results?.length) return null
+    if (searchData.results?.length) {
+      const appleMusicUrl = searchData.results[0].collectionViewUrl
+      if (appleMusicUrl) {
+        const result = await fetchArtworkFromAppleMusicUrl(appleMusicUrl)
+        if (result) return result
+      }
+    }
 
-    const appleMusicUrl = searchData.results[0].collectionViewUrl
-    if (!appleMusicUrl) return null
-
-    const artworkResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+    const fallbackResponse = await fetch('https://artwork.dodoapps.io/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `url=${encodeURIComponent(appleMusicUrl)}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ search: `${data.artist} ${data.album}`, storefront: 'us', type: 'album' }),
     })
-    const artworkData = (await artworkResponse.json()) as AppleArtworkResponse
+    const fallbackData = (await fallbackResponse.json()) as { images?: Array<{ large: string }> }
 
-    if (artworkData.error || !artworkData.large) return null
-
-    const animatedResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
-    })
-    const animatedData = (await animatedResponse.json()) as AppleAnimatedResponse
-
-    const animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
-      ? animatedData.animatedUrl
-      : null
+    if (!fallbackData.images?.length) return null
 
     return {
-      imageUrl: artworkData.large,
-      animatedUrl,
+      imageUrl: fallbackData.images[0].large,
+      animatedUrl: null,
     }
   })
 
