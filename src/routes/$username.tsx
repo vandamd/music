@@ -16,7 +16,17 @@ const getCurrentTrack = createServerFn({ method: 'GET' })
     const username = data
     const url = `https://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=${username}&api_key=${process.env.LAST_FM_API_KEY}&format=json&limit=1`
     const response = await fetch(url)
-    const apiData = (await response.json()) as LastFmResponse
+
+    if (!response.ok) {
+      return null
+    }
+
+    const text = await response.text()
+    if (!text) {
+      return null
+    }
+
+    const apiData = JSON.parse(text) as LastFmResponse
 
     if (apiData.error) {
       return null
@@ -45,7 +55,13 @@ async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<Alb
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `url=${encodeURIComponent(appleMusicUrl)}`,
   })
-  const artworkData = (await artworkResponse.json()) as AppleArtworkResponse
+
+  if (!artworkResponse.ok) return null
+
+  const artworkText = await artworkResponse.text()
+  if (!artworkText) return null
+
+  const artworkData = JSON.parse(artworkText) as AppleArtworkResponse
 
   if (artworkData.error || !artworkData.large) return null
 
@@ -54,7 +70,13 @@ async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<Alb
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
   })
-  const animatedData = (await animatedResponse.json()) as AppleAnimatedResponse
+
+  if (!animatedResponse.ok) return null
+
+  const animatedText = await animatedResponse.text()
+  if (!animatedText) return null
+
+  const animatedData = JSON.parse(animatedText) as AppleAnimatedResponse
 
   const animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
     ? animatedData.animatedUrl
@@ -71,13 +93,19 @@ const getAlbumArt = createServerFn({ method: 'GET' })
   .handler(async ({ data }): Promise<AlbumArtResult | null> => {
     const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${data.artist} ${data.track}`)}&entity=song&limit=1`
     const searchResponse = await fetch(searchUrl)
-    const searchData = (await searchResponse.json()) as { results: Array<{ collectionViewUrl: string }> }
 
-    if (searchData.results?.length) {
-      const appleMusicUrl = searchData.results[0].collectionViewUrl
-      if (appleMusicUrl) {
-        const result = await fetchArtworkFromAppleMusicUrl(appleMusicUrl)
-        if (result) return result
+    if (searchResponse.ok) {
+      const searchText = await searchResponse.text()
+      if (searchText) {
+        const searchData = JSON.parse(searchText) as { results: Array<{ collectionViewUrl: string }> }
+
+        if (searchData.results?.length) {
+          const appleMusicUrl = searchData.results[0].collectionViewUrl
+          if (appleMusicUrl) {
+            const result = await fetchArtworkFromAppleMusicUrl(appleMusicUrl)
+            if (result) return result
+          }
+        }
       }
     }
 
@@ -86,7 +114,13 @@ const getAlbumArt = createServerFn({ method: 'GET' })
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ search: `${data.artist} ${data.album}`, storefront: 'us', type: 'album' }),
     })
-    const fallbackData = (await fallbackResponse.json()) as { images?: Array<{ large: string }> }
+
+    if (!fallbackResponse.ok) return null
+
+    const fallbackText = await fallbackResponse.text()
+    if (!fallbackText) return null
+
+    const fallbackData = JSON.parse(fallbackText) as { images?: Array<{ large: string }> }
 
     if (!fallbackData.images?.length) return null
 
