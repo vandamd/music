@@ -1,11 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 import type {
   CurrentTrack,
   LastFmResponse,
-  ArtworkApiResponse,
+  AppleArtworkResponse,
+  AppleAnimatedResponse,
+  AlbumArtResult,
 } from '../types/lastfm'
 
 const getCurrentTrack = createServerFn({ method: 'GET' })
@@ -37,36 +39,42 @@ const getCurrentTrack = createServerFn({ method: 'GET' })
     }
   })
 
-async function imageUrlToBase64(url: string): Promise<string | null> {
-  try {
-    const response = await fetch(url)
-    if (!response.ok) return null
-    const blob = await response.blob()
-    return new Promise((resolve) => {
-      const reader = new FileReader()
-      reader.onloadend = () => resolve(reader.result as string)
-      reader.onerror = () => resolve(null)
-      reader.readAsDataURL(blob)
-    })
-  } catch {
-    return null
-  }
-}
-
 const getAlbumArt = createServerFn({ method: 'GET' })
-  .inputValidator((data: { artist: string; album: string }) => data)
-  .handler(async ({ data }): Promise<string | null> => {
-    const searchTerm = `${data.artist} ${data.album}`
-    const response = await fetch('https://artwork.dodoapps.io/', {
+  .inputValidator((data: { artist: string; album: string; track: string }) => data)
+  .handler(async ({ data }): Promise<AlbumArtResult | null> => {
+    const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${data.artist} ${data.track}`)}&entity=song&limit=1`
+    const searchResponse = await fetch(searchUrl)
+    const searchData = (await searchResponse.json()) as { results: Array<{ collectionViewUrl: string }> }
+
+    if (!searchData.results?.length) return null
+
+    const appleMusicUrl = searchData.results[0].collectionViewUrl
+    if (!appleMusicUrl) return null
+
+    const artworkResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ search: searchTerm, storefront: 'us', type: 'album' }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `url=${encodeURIComponent(appleMusicUrl)}`,
     })
-    const result = (await response.json()) as ArtworkApiResponse
+    const artworkData = (await artworkResponse.json()) as AppleArtworkResponse
 
-    if (result.error || !result.images?.length) return null
+    if (artworkData.error || !artworkData.large) return null
 
-    return result.images[0].large
+    const animatedResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
+    })
+    const animatedData = (await animatedResponse.json()) as AppleAnimatedResponse
+
+    const animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
+      ? animatedData.animatedUrl
+      : null
+
+    return {
+      imageUrl: artworkData.large,
+      animatedUrl,
+    }
   })
 
 export const Route = createFileRoute('/$username')({
@@ -78,31 +86,26 @@ export const Route = createFileRoute('/$username')({
     await getCurrentTrack({ data: params.username }),
 })
 
-type DisplayState = {
-  url: string | null
-  track?: string
-  artist?: string
+type MediaSource = {
+  type: 'video' | 'image'
+  element: HTMLVideoElement | HTMLImageElement
+  url: string
 }
+
+const TRANSITION_DURATION = 1500
 
 function UserListening() {
   const { username } = Route.useParams()
   const { placeholder } = Route.useSearch()
   const initialData = Route.useLoaderData()
-  const [currentDisplay, setCurrentDisplay] = useState<DisplayState | null>(null)
-  const [previousDisplay, setPreviousDisplay] = useState<DisplayState | null>(null)
-  const [isTransitioning, setIsTransitioning] = useState(false)
-  const currentDisplayRef = useRef<DisplayState | null>(null)
-  const [cachedPlaceholder, setCachedPlaceholder] = useState<string | null>(null)
 
-  const cachePlaceholder = useCallback(async () => {
-    if (!placeholder || cachedPlaceholder) return
-    const base64 = await imageUrlToBase64(placeholder)
-    if (base64) setCachedPlaceholder(base64)
-  }, [placeholder, cachedPlaceholder])
-
-  useEffect(() => {
-    cachePlaceholder()
-  }, [cachePlaceholder])
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const currentSourceRef = useRef<MediaSource | null>(null)
+  const nextSourceRef = useRef<MediaSource | null>(null)
+  const isTransitioningRef = useRef(false)
+  const transitionStartTimeRef = useRef(0)
+  const animationFrameRef = useRef<number>(0)
+  const currentUrlRef = useRef<string | null>(null)
 
   const { data: currentTrack } = useQuery({
     queryKey: ['currentTrack', username],
@@ -113,83 +116,180 @@ function UserListening() {
   })
 
   const { data: albumArt, isFetching: albumArtFetching } = useQuery({
-    queryKey: ['albumArt', currentTrack?.artist, currentTrack?.album],
+    queryKey: ['albumArt', currentTrack?.artist, currentTrack?.album, currentTrack?.track],
     queryFn: () =>
-      getAlbumArt({ data: { artist: currentTrack.artist, album: currentTrack.album } }),
-    enabled: !!currentTrack?.artist && !!currentTrack?.album,
+      getAlbumArt({ data: { artist: currentTrack!.artist, album: currentTrack!.album, track: currentTrack!.track } }),
+    enabled: !!currentTrack?.artist && !!currentTrack?.album && !!currentTrack?.track,
     staleTime: Infinity,
     placeholderData: keepPreviousData,
   })
 
-  const activePlaceholder = cachedPlaceholder || placeholder
+  const drawFrame = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const width = canvas.width
+    const height = canvas.height
+
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, width, height)
+
+    const drawCover = (source: MediaSource, alpha: number, blur: number = 0) => {
+      const element = source.element
+      let srcWidth: number
+      let srcHeight: number
+
+      if (source.type === 'video') {
+        const video = element as HTMLVideoElement
+        srcWidth = video.videoWidth
+        srcHeight = video.videoHeight
+      } else {
+        const img = element as HTMLImageElement
+        srcWidth = img.naturalWidth
+        srcHeight = img.naturalHeight
+      }
+
+      if (srcWidth === 0 || srcHeight === 0) return
+
+      const srcAspect = srcWidth / srcHeight
+      const destAspect = width / height
+
+      let drawWidth: number
+      let drawHeight: number
+      let offsetX: number
+      let offsetY: number
+
+      if (srcAspect > destAspect) {
+        drawHeight = height
+        drawWidth = height * srcAspect
+        offsetX = (width - drawWidth) / 2
+        offsetY = 0
+      } else {
+        drawWidth = width
+        drawHeight = width / srcAspect
+        offsetX = 0
+        offsetY = (height - drawHeight) / 2
+      }
+
+      ctx.save()
+      ctx.globalAlpha = alpha
+      if (blur > 0) {
+        ctx.filter = `blur(${blur}px)`
+      }
+      ctx.drawImage(element, offsetX, offsetY, drawWidth, drawHeight)
+      ctx.restore()
+    }
+
+    if (isTransitioningRef.current && currentSourceRef.current && nextSourceRef.current) {
+      const elapsed = performance.now() - transitionStartTimeRef.current
+      const progress = Math.min(elapsed / TRANSITION_DURATION, 1)
+
+      const eased = progress < 0.5
+        ? 2 * progress * progress
+        : 1 - Math.pow(-2 * progress + 2, 2) / 2
+      const maxBlur = 24 * window.devicePixelRatio
+
+      drawCover(nextSourceRef.current, 1, 0)
+      drawCover(currentSourceRef.current, 1 - eased, eased * maxBlur)
+
+      if (progress >= 1) {
+        isTransitioningRef.current = false
+        currentSourceRef.current = nextSourceRef.current
+        nextSourceRef.current = null
+      }
+    } else if (currentSourceRef.current) {
+      drawCover(currentSourceRef.current, 1)
+    }
+
+    animationFrameRef.current = requestAnimationFrame(drawFrame)
+  }, [])
+
+  const loadMedia = useCallback((url: string, isVideo: boolean): Promise<MediaSource> => {
+    return new Promise((resolve, reject) => {
+      if (isVideo) {
+        const video = document.createElement('video')
+        video.muted = true
+        video.loop = true
+        video.playsInline = true
+        video.preload = 'auto'
+        video.crossOrigin = 'anonymous'
+
+        video.oncanplaythrough = () => {
+          video.play()
+          resolve({ type: 'video', element: video, url })
+        }
+        video.onerror = () => reject()
+        video.src = url
+        video.load()
+      } else {
+        const img = new Image()
+        img.crossOrigin = 'anonymous'
+        img.onload = () => resolve({ type: 'image', element: img, url })
+        img.onerror = () => reject()
+        img.src = url
+      }
+    })
+  }, [])
+
+  const transitionTo = useCallback(async (url: string, isVideo: boolean) => {
+    try {
+      const newSource = await loadMedia(url, isVideo)
+
+      if (!currentSourceRef.current) {
+        currentSourceRef.current = newSource
+        currentUrlRef.current = url
+      } else {
+        nextSourceRef.current = newSource
+        isTransitioningRef.current = true
+        transitionStartTimeRef.current = performance.now()
+        currentUrlRef.current = url
+      }
+    } catch {}
+  }, [loadMedia])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const updateSize = () => {
+      canvas.width = window.innerWidth * window.devicePixelRatio
+      canvas.height = window.innerHeight * window.devicePixelRatio
+    }
+
+    updateSize()
+    window.addEventListener('resize', updateSize)
+
+    animationFrameRef.current = requestAnimationFrame(drawFrame)
+
+    return () => {
+      window.removeEventListener('resize', updateSize)
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+  }, [drawFrame])
 
   useEffect(() => {
     if (albumArtFetching) return
 
     const isPlaying = currentTrack?.isPlaying
-    const artUrl = isPlaying ? (albumArt || activePlaceholder) : activePlaceholder
-    const newDisplay: DisplayState = {
-      url: artUrl ?? null,
-      track: isPlaying ? currentTrack?.track : undefined,
-      artist: isPlaying ? currentTrack?.artist : undefined,
-    }
+    const animatedUrl = isPlaying ? albumArt?.animatedUrl : null
+    const imageUrl = isPlaying ? albumArt?.imageUrl : null
+    const targetUrl = animatedUrl || imageUrl || placeholder || null
 
-    const isSameDisplay = currentDisplayRef.current?.url === newDisplay.url
+    if (!targetUrl || targetUrl === currentUrlRef.current) return
 
-    if (isSameDisplay) return
+    if (isTransitioningRef.current) return
 
-    const startTransition = () => {
-      if (currentDisplayRef.current) {
-        setPreviousDisplay(currentDisplayRef.current)
-        setCurrentDisplay(newDisplay)
-        currentDisplayRef.current = newDisplay
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            setIsTransitioning(true)
-            setTimeout(() => {
-              setIsTransitioning(false)
-              setPreviousDisplay(null)
-            }, 1500)
-          })
-        })
-      } else {
-        setCurrentDisplay(newDisplay)
-        currentDisplayRef.current = newDisplay
-      }
-    }
-
-    if (newDisplay.url) {
-      const img = new Image()
-      img.onload = startTransition
-      img.src = newDisplay.url
-    } else {
-      startTransition()
-    }
-  }, [albumArt, albumArtFetching, currentTrack, activePlaceholder])
+    transitionTo(targetUrl, !!animatedUrl)
+  }, [albumArt, albumArtFetching, currentTrack, placeholder, transitionTo])
 
   return (
-    <div className="w-screen h-screen bg-black relative overflow-hidden">
-      {currentDisplay && (
-        <DisplayContent display={currentDisplay} />
-      )}
-      {previousDisplay && (
-        <div className={`absolute inset-0 transition-all duration-1500 ease-in-out ${isTransitioning ? 'opacity-0 blur-xl' : 'opacity-100 blur-0'}`}>
-          <DisplayContent display={previousDisplay} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function DisplayContent({ display }: { display: DisplayState }) {
-  if (!display.url) {
-    return <div className="absolute inset-0 bg-black" />
-  }
-  return (
-    <img
-      src={display.url}
-      className="absolute inset-0 w-full h-full object-cover"
-      alt={display.track ? `${display.track} by ${display.artist}` : 'Placeholder'}
+    <canvas
+      ref={canvasRef}
+      className="w-screen h-screen bg-black"
+      style={{ display: 'block' }}
     />
   )
 }

@@ -36,3 +36,24 @@ export type ArtworkApiResponse = {
   }>
   error?: string
 }
+
+export type AppleArtworkResponse = {
+  large: string
+  thumb: string
+  width: number
+  height: number
+  thumbWidth: number
+  thumbHeight: number
+  type: string
+  error?: string
+}
+
+export type AppleAnimatedResponse = {
+  animatedUrl: string
+  animatedUrl1080: string
+}
+
+export type AlbumArtResult = {
+  imageUrl: string
+  animatedUrl: string | null
+}
