@@ -92,7 +92,7 @@ async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<Alb
 const getAlbumArt = createServerFn({ method: 'GET' })
   .inputValidator((data: { artist: string; album: string; track: string }) => data)
   .handler(async ({ data }): Promise<AlbumArtResult | null> => {
-    const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${data.artist} ${data.track}`)}&entity=song&limit=1`
+    const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(`${data.artist} ${data.album}`)}&entity=album&limit=1`
     const searchResponse = await fetch(searchUrl)
 
     if (searchResponse.ok) {
@@ -174,10 +174,10 @@ function UserListening() {
   })
 
   const { data: albumArt, isFetching: albumArtFetching } = useQuery({
-    queryKey: ['albumArt', currentTrack?.artist, currentTrack?.album, currentTrack?.track],
+    queryKey: ['albumArt', currentTrack?.artist, currentTrack?.album],
     queryFn: () =>
       getAlbumArt({ data: { artist: currentTrack!.artist, album: currentTrack!.album, track: currentTrack!.track } }),
-    enabled: !!currentTrack?.artist && !!currentTrack?.album && !!currentTrack?.track,
+    enabled: !!currentTrack?.artist && !!currentTrack?.album,
     staleTime: Infinity,
     placeholderData: keepPreviousData,
   })
