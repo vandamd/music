@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
-import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { useQuery, keepPreviousData, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useCallback } from 'react'
 import type {
   CurrentTrack,
@@ -50,11 +50,18 @@ const getCurrentTrack = createServerFn({ method: 'GET' })
   })
 
 async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<AlbumArtResult | null> {
-  const artworkResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `url=${encodeURIComponent(appleMusicUrl)}`,
-  })
+  const [artworkResponse, animatedResponse] = await Promise.all([
+    fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `url=${encodeURIComponent(appleMusicUrl)}`,
+    }),
+    fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
+    }),
+  ])
 
   if (!artworkResponse.ok) return null
 
@@ -65,22 +72,16 @@ async function fetchArtworkFromAppleMusicUrl(appleMusicUrl: string): Promise<Alb
 
   if (artworkData.error || !artworkData.large) return null
 
-  const animatedResponse = await fetch('https://clients.dodoapps.io/playlist-precis/playlist-artwork.php', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `url=${encodeURIComponent(appleMusicUrl)}&animation=true`,
-  })
-
-  if (!animatedResponse.ok) return null
-
-  const animatedText = await animatedResponse.text()
-  if (!animatedText) return null
-
-  const animatedData = JSON.parse(animatedText) as AppleAnimatedResponse
-
-  const animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
-    ? animatedData.animatedUrl
-    : null
+  let animatedUrl: string | null = null
+  if (animatedResponse.ok) {
+    const animatedText = await animatedResponse.text()
+    if (animatedText) {
+      const animatedData = JSON.parse(animatedText) as AppleAnimatedResponse
+      animatedUrl = animatedData.animatedUrl?.includes('2160x2160')
+        ? animatedData.animatedUrl
+        : null
+    }
+  }
 
   return {
     imageUrl: artworkData.large,
@@ -152,6 +153,7 @@ function UserListening() {
   const { placeholder } = Route.useSearch()
   const initialData = Route.useLoaderData()
 
+  const queryClient = useQueryClient()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const currentSourceRef = useRef<MediaSource | null>(null)
   const nextSourceRef = useRef<MediaSource | null>(null)
@@ -164,8 +166,11 @@ function UserListening() {
     queryKey: ['currentTrack', username],
     queryFn: () => getCurrentTrack({ data: username }),
     initialData,
-    refetchInterval: 5000,
-    refetchIntervalInBackground: true,
+    refetchInterval: (query) => {
+      if (!query.state.data?.isPlaying) return 30000
+      return 5000
+    },
+    refetchIntervalInBackground: false,
   })
 
   const { data: albumArt, isFetching: albumArtFetching } = useQuery({
@@ -176,6 +181,19 @@ function UserListening() {
     staleTime: Infinity,
     placeholderData: keepPreviousData,
   })
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        queryClient.cancelQueries({ queryKey: ['currentTrack'] })
+      } else {
+        queryClient.invalidateQueries({ queryKey: ['currentTrack'] })
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [queryClient])
 
   const drawFrame = useCallback(() => {
     const canvas = canvasRef.current
