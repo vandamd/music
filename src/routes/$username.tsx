@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { createServerFn } from '@tanstack/react-start'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type {
   CurrentTrack,
   LastFmResponse,
@@ -36,6 +36,22 @@ const getCurrentTrack = createServerFn({ method: 'GET' })
       isPlaying,
     }
   })
+
+async function imageUrlToBase64(url: string): Promise<string | null> {
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return null
+    const blob = await response.blob()
+    return new Promise((resolve) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result as string)
+      reader.onerror = () => resolve(null)
+      reader.readAsDataURL(blob)
+    })
+  } catch {
+    return null
+  }
+}
 
 const getAlbumArt = createServerFn({ method: 'GET' })
   .inputValidator((data: { artist: string; album: string }) => data)
@@ -76,6 +92,17 @@ function UserListening() {
   const [previousDisplay, setPreviousDisplay] = useState<DisplayState | null>(null)
   const [isTransitioning, setIsTransitioning] = useState(false)
   const currentDisplayRef = useRef<DisplayState | null>(null)
+  const [cachedPlaceholder, setCachedPlaceholder] = useState<string | null>(null)
+
+  const cachePlaceholder = useCallback(async () => {
+    if (!placeholder || cachedPlaceholder) return
+    const base64 = await imageUrlToBase64(placeholder)
+    if (base64) setCachedPlaceholder(base64)
+  }, [placeholder, cachedPlaceholder])
+
+  useEffect(() => {
+    cachePlaceholder()
+  }, [cachePlaceholder])
 
   const { data: currentTrack } = useQuery({
     queryKey: ['currentTrack', username],
@@ -94,11 +121,13 @@ function UserListening() {
     placeholderData: keepPreviousData,
   })
 
+  const activePlaceholder = cachedPlaceholder || placeholder
+
   useEffect(() => {
     if (albumArtFetching) return
 
     const isPlaying = currentTrack?.isPlaying
-    const artUrl = isPlaying ? (albumArt || placeholder) : placeholder
+    const artUrl = isPlaying ? (albumArt || activePlaceholder) : activePlaceholder
     const newDisplay: DisplayState = {
       url: artUrl ?? null,
       track: isPlaying ? currentTrack?.track : undefined,
@@ -136,7 +165,7 @@ function UserListening() {
     } else {
       startTransition()
     }
-  }, [albumArt, albumArtFetching, currentTrack, placeholder])
+  }, [albumArt, albumArtFetching, currentTrack, activePlaceholder])
 
   return (
     <div className="w-screen h-screen bg-black relative overflow-hidden">
